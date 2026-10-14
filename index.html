@@ -47,8 +47,8 @@
   <details open><summary>decision — <b id="dec">—</b></summary><div class="body" id="plan"></div></details>
   <details><summary>thinking</summary><div class="body" id="log"></div></details>
   <details><summary>legend</summary><div class="body legend">
-    <span><i style="background:var(--me)"></i>us</span><span><i style="background:var(--enemy)"></i>enemy</span>
-    <span><i style="background:var(--friend)"></i>team</span><span><i style="background:var(--walk)"></i>walk / jump</span>
+    <span><i style="background:none;border:2px solid #fff"></i>turn worm</span><span><i style="background:#ff5d5d"></i><i style="background:#4fc3ff"></i><i style="background:#57d18c"></i>teams</span>
+    <span><i style="background:none;border:2px solid #d33"></i>mine</span><span><i style="background:#e8d9a8"></i>rope</span><span><i style="background:var(--walk)"></i>walk / jump</span>
     <span><i style="background:var(--chute)"></i>chute</span><span><i style="background:var(--shot)"></i>shot</span>
     <span><i style="background:var(--blast)"></i>blast</span>
   </div></details>
@@ -57,7 +57,10 @@
 const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-let turn = null, plan = null, live = null, land = null, anim = 0, es = null;
+let turn = null, plan = null, land = null, anim = 0, es = null;
+let geo = null, ents = null, entsAt = 0, trails = new Map(), turnWorm = 0;
+const TEAMS = ['#ff5d5d', '#4fc3ff', '#57d18c', '#f7d154', '#c78bff', '#ff9f43'];
+const teamColor = t => TEAMS[t % TEAMS.length];
 
 function connect() {
   if (es) es.close();
@@ -70,10 +73,19 @@ function connect() {
 }
 
 function on(m) {
-  if (m.type === 'turn') {
-    turn = m; plan = null; live = null;
+  if (m.type === 'map') {
+    geo = m; land = terrain(m); $('idle').style.display = 'none'; if (!anim) draw();
+  } else if (m.type === 'ents') {
+    ents = m; entsAt = performance.now();
+    const me = m.worms.find(w => w[5]);
+    if (me && me[0] !== turnWorm) { turnWorm = me[0]; trails.clear(); }
+    for (const w of m.worms) if (w[5]) track(w[0], w[1], w[2]);
+    for (const q of m.proj) track(q[0], q[1], q[2]);
+    $('meta').textContent = `${turn ? turn.mode + ' · ' : ''}frame ${m.t} · wind ${m.wind > 0 ? '→' : m.wind < 0 ? '←' : '·'} ${Math.abs(m.wind).toFixed(2)}`;
+    if (!anim) draw();
+  } else if (m.type === 'turn') {
+    turn = m; plan = null; geo = m;
     $('idle').style.display = 'none';
-    $('meta').textContent = `${m.mode} · frame ${m.frame} · wind ${m.wind > 0 ? '→' : m.wind < 0 ? '←' : '·'} ${Math.abs(m.wind).toFixed(2)}`;
     $('log').innerHTML = ''; $('dec').textContent = 'thinking…'; $('plan').textContent = '';
     land = terrain(m); draw();
   } else if (m.type === 'log') {
@@ -82,8 +94,6 @@ function on(m) {
   } else if (m.type === 'plan') {
     plan = m; $('dec').textContent = m.text.split('\n')[0]; $('plan').textContent = m.text.split('\n').slice(1).join('\n');
     play();
-  } else if (m.type === 'live') {
-    live = [m.x, m.y]; if (!anim) draw();
   }
 }
 
@@ -100,11 +110,51 @@ function terrain(m) {
 }
 const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
+function track(id, x, y) {
+  let t = trails.get(id); if (!t) trails.set(id, t = []);
+  const l = t[t.length - 1]; if (!l || l[0] !== x || l[1] !== y) t.push([x, y]);
+  if (t.length > 600) t.shift();
+}
+
 function draw() {
-  if (!turn) return;
-  cv.width = turn.w; cv.height = turn.h;
-  ctx.fillStyle = css('--water'); ctx.fillRect(0, turn.water, turn.w, turn.h - turn.water);
+  if (!geo) return;
+  cv.width = geo.w; cv.height = geo.h;
+  ctx.fillStyle = css('--water'); ctx.fillRect(0, geo.water, geo.w, geo.h - geo.water);
   ctx.drawImage(land, 0, 0);
+  if (ents && performance.now() - entsAt < 3000) drawLive(); else if (turn) drawTurn();
+  if (plan && turn) drawPlan();
+}
+
+// the live game (every mode): team-coloured worms, the turn worm ringed with its trail, rope,
+// chute canopy, projectiles with their trails, mines, drums, crates
+function drawLive() {
+  const e = ents;
+  for (const [x, y] of e.mines) dotAt(x, y, 4, '#d33', true);
+  for (const [x, y] of e.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
+  for (const [x, y] of e.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const [id, t] of trails) {
+    if (t.length < 2) continue;
+    const isProj = !e.worms.some(w => w[0] === id);
+    ctx.strokeStyle = isProj ? css('--shot') + '99' : '#ffffff55'; ctx.lineWidth = 2;
+    ctx.setLineDash(isProj ? [2, 4] : []);
+    ctx.beginPath(); ctx.moveTo(t[0][0], t[0][1]); for (const p of t) ctx.lineTo(p[0], p[1]); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  if (e.rope.length > 1) {
+    ctx.strokeStyle = '#e8d9a8'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(e.rope[0][0], e.rope[0][1]); for (const p of e.rope) ctx.lineTo(p[0], p[1]); ctx.stroke();
+    dotAt(e.rope[0][0], e.rope[0][1], 3, '#e8d9a8');
+  }
+  for (const [id, x, y, team, st, on] of e.worms) {
+    if (st === 0x7D) canopy(x, y);
+    dotAt(x, y, 9, teamColor(team));
+    if (on) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.stroke(); }
+  }
+  for (const [, x, y] of e.proj) dotAt(x, y, 5, css('--shot'));
+}
+
+function drawTurn() {
   for (const [x, y] of turn.mines) dotAt(x, y, 4, '#d33', true);
   for (const [x, y] of turn.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
   for (const [x, y] of turn.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
@@ -114,8 +164,6 @@ function draw() {
     dotAt(x, y, 9, css(k === 'enemy' ? '--enemy' : '--friend'));
   }
   if (!plan || !plan.route.length) dotAt(turn.me[0], turn.me[1], 10, css('--me'));
-  if (plan) drawPlan();
-  if (live) { ctx.strokeStyle = css('--me'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(live[0], live[1], 14, 0, 7); ctx.stroke(); }
 }
 
 function dotAt(x, y, r, c, ring) {
