@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WFbot viz</title>
+<style>
+  :root {
+    --bg: #0e1013; --panel: #15181d; --line: #252a31; --text: #c9ced6; --dim: #6b7380;
+    --land: #3b5a3c; --water: #1b3a57; --me: #4fc3ff; --enemy: #ff5d5d; --friend: #57d18c;
+    --walk: #e8e8e8; --chute: #6fe3ff; --shot: #ffb347; --blast: #ff7a45;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 ui-monospace, Consolas, monospace; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  header b { letter-spacing: .08em; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }
+  .dot.on { background: #4cd964; box-shadow: 0 0 6px #4cd964; }
+  .sp { flex: 1; }
+  header span { color: var(--dim); }
+  button, input { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font: inherit; }
+  button:hover { border-color: var(--dim); cursor: pointer; }
+  input { width: 64px; }
+  main { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; }
+  #wrap { position: relative; width: 100%; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #0b0c0f; }
+  canvas { display: block; width: 100%; height: auto; }
+  #idle { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); }
+  details { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  summary { padding: 6px 10px; cursor: pointer; color: var(--dim); user-select: none; }
+  summary b { color: var(--text); font-weight: 500; }
+  .body { padding: 0 10px 8px; white-space: pre-wrap; }
+  #log { max-height: 180px; overflow: auto; color: var(--dim); }
+  #log div:last-child { color: var(--text); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--dim); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div><b>WFBOT</b><span id="meta">offline</span>
+  <div class="sp"></div>
+  <button id="replay" title="replay the plan">replay</button>
+  <label><span>port</span> <input id="port" value="8765"></label>
+</header>
+<main>
+  <div id="wrap"><canvas id="cv" width="1920" height="696"></canvas><div id="idle">waiting for the bot…</div></div>
+  <details open><summary>decision — <b id="dec">—</b></summary><div class="body" id="plan"></div></details>
+  <details><summary>thinking</summary><div class="body" id="log"></div></details>
+  <details><summary>legend</summary><div class="body legend">
+    <span><i style="background:var(--me)"></i>us</span><span><i style="background:var(--enemy)"></i>enemy</span>
+    <span><i style="background:var(--friend)"></i>team</span><span><i style="background:var(--walk)"></i>walk / jump</span>
+    <span><i style="background:var(--chute)"></i>chute</span><span><i style="background:var(--shot)"></i>shot</span>
+    <span><i style="background:var(--blast)"></i>blast</span>
+  </div></details>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let turn = null, plan = null, live = null, land = null, anim = 0, es = null;
+
+function connect() {
+  if (es) es.close();
+  const port = $('port').value || 8765;
+  const base = location.port === String(port) ? '' : `http://127.0.0.1:${port}`;
+  es = new EventSource(`${base}/events`);
+  es.onopen = () => $('dot').classList.add('on');
+  es.onerror = () => { $('dot').classList.remove('on'); $('meta').textContent = 'offline'; };
+  es.onmessage = e => { try { on(JSON.parse(e.data)); } catch (_) {} };
+}
+
+function on(m) {
+  if (m.type === 'turn') {
+    turn = m; plan = null; live = null;
+    $('idle').style.display = 'none';
+    $('meta').textContent = `${m.mode} · frame ${m.frame} · wind ${m.wind > 0 ? '→' : m.wind < 0 ? '←' : '·'} ${Math.abs(m.wind).toFixed(2)}`;
+    $('log').innerHTML = ''; $('dec').textContent = 'thinking…'; $('plan').textContent = '';
+    land = terrain(m); draw();
+  } else if (m.type === 'log') {
+    const d = document.createElement('div'); d.textContent = m.text; $('log').appendChild(d);
+    $('log').scrollTop = 1e9;
+  } else if (m.type === 'plan') {
+    plan = m; $('dec').textContent = m.text.split('\n')[0]; $('plan').textContent = m.text.split('\n').slice(1).join('\n');
+    play();
+  } else if (m.type === 'live') {
+    live = [m.x, m.y]; if (!anim) draw();
+  }
+}
+
+function terrain(m) {
+  const c = document.createElement('canvas'); c.width = m.w; c.height = m.h;
+  const g = c.getContext('2d'), img = g.createImageData(m.cw, m.ch), raw = atob(m.map);
+  const [r, gr, b] = hex(css('--land'));
+  for (let i = 0; i < m.cw * m.ch; i++) {
+    if (raw.charCodeAt(i >> 3) >> (i & 7) & 1) { const o = i * 4; img.data[o] = r; img.data[o+1] = gr; img.data[o+2] = b; img.data[o+3] = 255; }
+  }
+  const t = document.createElement('canvas'); t.width = m.cw; t.height = m.ch; t.getContext('2d').putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = false; g.drawImage(t, 0, 0, m.w, m.h);
+  return c;
+}
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+
+function draw(progress = 1) {
+  if (!turn) return;
+  cv.width = turn.w; cv.height = turn.h;
+  ctx.fillStyle = css('--water'); ctx.fillRect(0, turn.water, turn.w, turn.h - turn.water);
+  ctx.drawImage(land, 0, 0);
+  for (const [x, y] of turn.mines) dotAt(x, y, 4, '#d33', true);
+  for (const [x, y] of turn.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
+  for (const [x, y] of turn.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
+  for (const [x, y, k] of turn.worms) dotAt(x, y, 9, css(k === 'enemy' ? '--enemy' : '--friend'));
+  dotAt(turn.me[0], turn.me[1], 10, css('--me'));
+  if (plan) drawPlan(progress);
+  if (live) { ctx.strokeStyle = css('--me'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(live[0], live[1], 14, 0, 7); ctx.stroke(); }
+}
+
+function dotAt(x, y, r, c, ring) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+  if (ring) { ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.stroke(); } else { ctx.fillStyle = c; ctx.fill(); }
+}
+
+// the route, then the shot: `progress` 0..1 over both
+function drawPlan(p) {
+  const r = plan.route, s = plan.shot, total = r.length + s.length || 1, cut = p * total;
+  ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (let i = 1; i < r.length && i <= cut; i++) {
+    const k = r[i][2];
+    ctx.strokeStyle = css(k === 'chute' ? '--chute' : '--walk');
+    ctx.setLineDash(k === 'jump' || k === 'fall' ? [3, 6] : k === 'chute' ? [10, 6] : []);
+    ctx.beginPath(); ctx.moveTo(r[i-1][0], r[i-1][1]); ctx.lineTo(r[i][0], r[i][1]); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  if (r.length && cut < r.length) { const q = r[Math.min(r.length - 1, Math.floor(cut))]; dotAt(q[0], q[1], 10, css('--me')); }
+  const sc = cut - r.length;
+  if (sc > 0 && s.length) {
+    ctx.strokeStyle = css('--shot'); ctx.setLineDash(plan.weapon === 'Grenade' ? [2, 5] : []); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(s[0][0], s[0][1]);
+    for (let i = 1; i < s.length && i <= sc; i++) ctx.lineTo(s[i][0], s[i][1]);
+    ctx.stroke(); ctx.setLineDash([]);
+    const q = s[Math.min(s.length - 1, Math.floor(sc))];
+    if (plan.weapon === 'Grenade') dotAt(q[0], q[1], 5, css('--shot'));
+    else { ctx.fillStyle = css('--shot'); ctx.fillRect(q[0] - 6, q[1] - 3, 12, 6); }
+  }
+  if (p >= 1 && plan.blast) {
+    const [x, y, rad] = plan.blast;
+    ctx.strokeStyle = css('--blast'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.stroke();
+    ctx.fillStyle = css('--blast') + '33'; ctx.fill();
+  }
+}
+
+function play() {
+  const t0 = performance.now(), n = (plan.route.length + plan.shot.length) || 1, dur = Math.min(6000, 600 + n * 25);
+  cancelAnimationFrame(anim);
+  const step = now => { const p = Math.max(0, Math.min(1, (now - t0) / dur)); draw(p); anim = p < 1 ? requestAnimationFrame(step) : 0; };
+  anim = requestAnimationFrame(step);
+}
+
+$('replay').onclick = () => plan && play();
+$('port').onchange = () => { localStorage.port = $('port').value; connect(); };
+$('port').value = localStorage.port || 8765;
+connect();
+</script>
+</body>
+</html>
