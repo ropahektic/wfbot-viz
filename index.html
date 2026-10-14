@@ -157,26 +157,7 @@ function render(now) {
   drawTargets(now, me);
   if (me) { marker(me[0], me[1], now); drawBubble(me[0], me[1], now); }
   hud();
-  consolePanel(now);
   requestAnimationFrame(render);
-}
-
-// the top-right corner: the bot's own log, small, fading
-function consolePanel(now) {
-  if (!cons.length) return;
-  ctx.save(); ctx.scale(U, U);
-  const W = cv.width / U, lh = 15, w = 420, x = W - w - 10, y = 10, h = cons.length * lh + 12;
-  ctx.fillStyle = 'rgba(14,16,19,0.75)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 6); ctx.fill();
-  ctx.font = `12px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  cons.forEach((l, i) => {
-    const age = now - l.t, a = Math.max(0, Math.min(1, age / 150) * Math.min(1, (CONS_LIFE - age) / 1500));
-    const c = l.kind === 'decision' ? '255,200,90' : l.kind === 'log' ? '225,229,235' : '175,182,194';
-    let s = l.text; while (ctx.measureText(s).width > w - 14 && s.length > 4) s = s.slice(0, -2);
-    if (s !== l.text) s = s.slice(0, -1) + '…';
-    ctx.fillStyle = `rgba(${c},${a})`; ctx.fillText(s, x + 7, y + 6 + i * lh);
-  });
-  ctx.textBaseline = 'alphabetic';
-  ctx.restore();
 }
 
 // the canvas fills the window keeping the map's aspect
