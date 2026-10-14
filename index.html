@@ -155,7 +155,8 @@ function render(now) {
   const me = live ? drawLive() : turn ? drawTurn() : null;
   if (plan && turn) drawPlan();
   drawTargets(now, me);
-  if (me) { marker(me[0], me[1], now); drawBubble(me[0], me[1], now); }
+  // no bubble while the plan preview plays: it speaks for the real actions
+  if (me) { marker(me[0], me[1], now); if (!playing) drawBubble(me[0], me[1], now); }
   hud();
   requestAnimationFrame(render);
 }
