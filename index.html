@@ -8,7 +8,7 @@
   :root {
     --bg: #0e1013; --panel: #15181d; --line: #252a31; --text: #c9ced6; --dim: #6b7380;
     --land: #3b5a3c; --water: #1b3a57; --me: #4fc3ff; --enemy: #ff5d5d; --friend: #57d18c;
-    --walk: #e8e8e8; --chute: #6fe3ff; --shot: #ffb347; --blast: #ff7a45;
+    --walk: #e8e8e8; --water-hi: #9fd4ff; --chute: #6fe3ff; --shot: #ffb347; --blast: #ff7a45;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 ui-monospace, Consolas, monospace; }
@@ -100,7 +100,7 @@ function terrain(m) {
 }
 const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
-function draw(progress = 1) {
+function draw() {
   if (!turn) return;
   cv.width = turn.w; cv.height = turn.h;
   ctx.fillStyle = css('--water'); ctx.fillRect(0, turn.water, turn.w, turn.h - turn.water);
@@ -108,9 +108,13 @@ function draw(progress = 1) {
   for (const [x, y] of turn.mines) dotAt(x, y, 4, '#d33', true);
   for (const [x, y] of turn.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
   for (const [x, y] of turn.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
-  for (const [x, y, k] of turn.worms) dotAt(x, y, 9, css(k === 'enemy' ? '--enemy' : '--friend'));
-  dotAt(turn.me[0], turn.me[1], 10, css('--me'));
-  if (plan) drawPlan(progress);
+  const flying = plan && plan.blast && (tick < 0 || tick >= plan.blast[3]) ? plan.flights.map(f => f.pts[0]) : [];
+  for (const [x, y, k] of turn.worms) {
+    if (flying.some(p => Math.abs(p[0] - x) < 2 && Math.abs(p[1] - y) < 2)) continue;
+    dotAt(x, y, 9, css(k === 'enemy' ? '--enemy' : '--friend'));
+  }
+  if (!plan || !plan.route.length) dotAt(turn.me[0], turn.me[1], 10, css('--me'));
+  if (plan) drawPlan();
   if (live) { ctx.strokeStyle = css('--me'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(live[0], live[1], 14, 0, 7); ctx.stroke(); }
 }
 
@@ -119,39 +123,98 @@ function dotAt(x, y, r, c, ring) {
   if (ring) { ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.stroke(); } else { ctx.fillStyle = c; ctx.fill(); }
 }
 
-// the route, then the shot: `progress` 0..1 over both
-function drawPlan(p) {
-  const r = plan.route, s = plan.shot, total = r.length + s.length || 1, cut = p * total;
-  ctx.lineWidth = 3; ctx.lineCap = 'round';
-  for (let i = 1; i < r.length && i <= cut; i++) {
-    const k = r[i][2];
-    ctx.strokeStyle = css(k === 'chute' ? '--chute' : '--walk');
-    ctx.setLineDash(k === 'jump' || k === 'fall' ? [3, 6] : k === 'chute' ? [10, 6] : []);
+// the plan as a timeline in game ticks: the worm along its route (canopy while chuting), the
+// shot, the blast, the enemies flying along their arcs (splash when they drown)
+const SPEED = 2;  // ticks per animation frame (~2x game speed)
+let tick = -1;
+function at(pts, t, ti) {  // position at tick t on points carrying their tick at index ti
+  if (!pts.length) return null;
+  if (t <= pts[0][ti]) return [pts[0], 0];
+  for (let i = 1; i < pts.length; i++) if (pts[i][ti] >= t) {
+    const a = pts[i-1], b = pts[i], f = (t - a[ti]) / Math.max(1, b[ti] - a[ti]);
+    return [[a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, b[2]], i];
+  }
+  return [pts[pts.length - 1], pts.length];
+}
+function planEnd() {
+  if (!plan) return 0;
+  const r = plan.route, b = plan.blast, fl = Math.max(0, ...plan.flights.map(f => f.pts.length));
+  return Math.max(r.length ? r[r.length-1][3] : 0, b ? b[3] + fl + 40 : plan.shot_t0 + plan.shot.length * plan.shot_dt);
+}
+function drawPlan() {
+  const r = plan.route, t = tick < 0 ? 1e9 : tick;
+  // the whole route, faint; walked part, bright
+  ctx.lineCap = 'round';
+  for (let i = 1; i < r.length; i++) {
+    const k = r[i][2], done = r[i][3] <= t;
+    ctx.strokeStyle = css(k === 'chute' ? '--chute' : '--walk') + (done ? '' : '44');
+    ctx.lineWidth = done ? 3 : 2;
+    ctx.setLineDash(k === 'jump' || k === 'fall' ? [3, 6] : []);
     ctx.beginPath(); ctx.moveTo(r[i-1][0], r[i-1][1]); ctx.lineTo(r[i][0], r[i][1]); ctx.stroke();
   }
   ctx.setLineDash([]);
-  if (r.length && cut < r.length) { const q = r[Math.min(r.length - 1, Math.floor(cut))]; dotAt(q[0], q[1], 10, css('--me')); }
-  const sc = cut - r.length;
-  if (sc > 0 && s.length) {
+  // the worm
+  const w = at(r, t, 3);
+  if (w) {
+    const [[x, y, k]] = w;
+    if (k === 'chute') canopy(x, y);
+    if (k === 'crouch') { ctx.fillStyle = css('--me'); ctx.beginPath(); ctx.ellipse(x, y + 3, 11, 7, 0, 0, 7); ctx.fill(); }
+    else dotAt(x, y, 10, css('--me'));
+  }
+  // the shot
+  const s = plan.shot, st = (t - plan.shot_t0) / plan.shot_dt;
+  if (s.length && st >= 0) {
+    const n = Math.min(s.length - 1, Math.floor(st));
     ctx.strokeStyle = css('--shot'); ctx.setLineDash(plan.weapon === 'Grenade' ? [2, 5] : []); ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(s[0][0], s[0][1]);
-    for (let i = 1; i < s.length && i <= sc; i++) ctx.lineTo(s[i][0], s[i][1]);
-    ctx.stroke(); ctx.setLineDash([]);
-    const q = s[Math.min(s.length - 1, Math.floor(sc))];
-    if (plan.weapon === 'Grenade') dotAt(q[0], q[1], 5, css('--shot'));
-    else { ctx.fillStyle = css('--shot'); ctx.fillRect(q[0] - 6, q[1] - 3, 12, 6); }
+    ctx.beginPath(); ctx.moveTo(s[0][0], s[0][1]); for (let i = 1; i <= n; i++) ctx.lineTo(s[i][0], s[i][1]); ctx.stroke(); ctx.setLineDash([]);
+    if (!plan.blast || t < plan.blast[3]) {
+      const q = s[n];
+      if (plan.weapon === 'Grenade') dotAt(q[0], q[1], 5, css('--shot'));
+      else { const p = s[Math.max(0, n - 1)], a = Math.atan2(q[1] - p[1], q[0] - p[0]);
+        ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(a); ctx.fillStyle = css('--shot'); ctx.fillRect(-7, -3, 14, 6); ctx.restore(); }
+    }
   }
-  if (p >= 1 && plan.blast) {
-    const [x, y, rad] = plan.blast;
-    ctx.strokeStyle = css('--blast'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, rad, 0, 7); ctx.stroke();
-    ctx.fillStyle = css('--blast') + '33'; ctx.fill();
+  // the blast and the flights
+  const b = plan.blast;
+  if (b && t >= b[3]) {
+    const bt = t - b[3], [x, y, rad] = b;
+    const flash = Math.max(0, 1 - bt / 30);
+    ctx.fillStyle = css('--blast') + hx2(0x22 + flash * 0x99); ctx.beginPath(); ctx.arc(x, y, rad * (0.6 + 0.4 * Math.min(1, bt / 6)), 0, 7); ctx.fill();
+    ctx.strokeStyle = css('--blast'); ctx.lineWidth = 2; ctx.stroke();
+    for (const f of plan.flights) {
+      const p = f.pts, n = Math.min(p.length - 1, bt);
+      ctx.strokeStyle = css('--enemy'); ctx.lineWidth = 2; ctx.setLineDash([4, 5]);
+      ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]); for (let i = 1; i <= n; i++) ctx.lineTo(p[i][0], p[i][1]); ctx.stroke(); ctx.setLineDash([]);
+      const q = p[n];
+      if (f.drowned && n === p.length - 1) splash(q[0], turn.water, bt - (p.length - 1));
+      else dotAt(q[0], q[1], 9, css('--enemy'));
+    }
+  } else if (b) {
+    // before the blast: where they will go, faint
+    for (const f of plan.flights) {
+      ctx.strokeStyle = css('--enemy') + '33'; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+      ctx.beginPath(); ctx.moveTo(f.pts[0][0], f.pts[0][1]); for (const q of f.pts) ctx.lineTo(q[0], q[1]); ctx.stroke(); ctx.setLineDash([]);
+    }
   }
+}
+const hx2 = v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
+function canopy(x, y) {
+  ctx.strokeStyle = css('--chute'); ctx.fillStyle = css('--chute') + '55'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y - 26, 18, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x - 18, y - 26); ctx.lineTo(x, y - 6); ctx.lineTo(x + 18, y - 26); ctx.stroke();
+}
+function splash(x, y, k) {
+  const a = Math.max(0, 1 - k / 60);
+  ctx.strokeStyle = css('--water-hi') + hx2(255 * a); ctx.lineWidth = 2;
+  for (const r of [8, 16, 24]) { ctx.beginPath(); ctx.ellipse(x, y, r + k * 0.4, (r + k * 0.4) / 3, 0, 0, 7); ctx.stroke(); }
+  ctx.fillStyle = css('--enemy') + hx2(255 * a); ctx.font = 'bold 18px ui-monospace, monospace'; ctx.textAlign = 'center';
+  ctx.fillText('✕', x, y - 14);
 }
 
 function play() {
-  const t0 = performance.now(), n = (plan.route.length + plan.shot.length) || 1, dur = Math.min(6000, 600 + n * 25);
   cancelAnimationFrame(anim);
-  const step = now => { const p = Math.max(0, Math.min(1, (now - t0) / dur)); draw(p); anim = p < 1 ? requestAnimationFrame(step) : 0; };
+  const end = planEnd(); tick = 0;
+  const step = () => { tick += SPEED; draw(); if (tick < end) anim = requestAnimationFrame(step); else { anim = 0; tick = -1; draw(); } };
   anim = requestAnimationFrame(step);
 }
 
