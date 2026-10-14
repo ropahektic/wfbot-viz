@@ -37,9 +37,10 @@ let U = 1, S = 1;
 // the search: candidate routes fading as they die, the best so far, the final pick shining
 let ghosts = [], best = null;
 const GHOST_LIFE = 1400;   // canvas px per screen px; the drawing boost for small displays
-// the think bubble: lines with their birth time; a queue paces them in
-let bubble = [], queue = [], lastPop = 0, decision = null;
-const LIFE = 5200, GAP = 260, MAXLINES = 5;
+// the think bubble: plain words from the bot (what the worm is doing); the newest stays, the
+// ones before fade out. The raw log goes to the console in the top-right corner, paced.
+let bubble = [], queue = [], lastPop = 0, decision = null, cons = [];
+const LIFE = 4000, GAP = 120, MAXLINES = 3, CONS_LIFE = 9000, CONS_LINES = 9;
 
 function connect() {
   if (es) es.close();
@@ -51,10 +52,15 @@ function connect() {
   es.onmessage = e => { try { on(JSON.parse(e.data)); } catch (_) {} };
 }
 
-function say(text, kind) {
+function say(text) {
+  if (!text) return;
+  bubble.push({ text, t: performance.now() });
+  if (bubble.length > MAXLINES) bubble.splice(0, bubble.length - MAXLINES);
+}
+function logline(text, kind) {
   if (!text) return;
   queue.push({ text, kind });
-  if (queue.length > 8) queue.splice(0, queue.length - 8);   // a flood: keep the newest
+  if (queue.length > 12) queue.splice(0, queue.length - 12);   // a flood: keep the newest
 }
 
 function on(m) {
@@ -73,16 +79,18 @@ function on(m) {
   } else if (m.type === 'turn') {
     turn = m; plan = null; targets = []; geo = m; land = terrain(m); decision = null;
   } else if (m.type === 'log') {
-    say(m.text, 'log');
+    logline(m.text, 'log');
   } else if (m.type === 'think') {
-    say(m.text, 'raw');
+    logline(m.text, 'raw');
+  } else if (m.type === 'say') {
+    say(m.text);
   } else if (m.type === 'route') {
     const now = performance.now();
     if (m.kind === 0) { for (const r of m.routes) ghosts.push({ pts: r, t: now }); if (ghosts.length > 80) ghosts.splice(0, ghosts.length - 80); }
     else best = { pts: m.routes[0], t: now, final: m.kind === 2 };
   } else if (m.type === 'plan') {
     plan = m; decision = m.text.split('\n')[0];
-    say('→ ' + decision, 'decision');
+    logline('→ ' + decision, 'decision');
     pickTargets(); play();
   }
 }
@@ -130,10 +138,10 @@ function dotAt(x, y, r, c, ring) {
 
 // ---------------------------------------------------------------- the frame
 function render(now) {
-  // the bubble's rhythm: one queued line in every GAP ms, each fades out after its life
-  if (queue.length && now - lastPop > GAP) { bubble.push({ ...queue.shift(), t: now }); lastPop = now; }
-  bubble = bubble.filter(l => now - l.t < life(l));
-  if (bubble.length > MAXLINES) bubble.splice(0, bubble.length - MAXLINES);
+  // the console's rhythm: one queued line in every GAP ms; the bubble keeps its newest line
+  if (queue.length && now - lastPop > GAP) { cons.push({ ...queue.shift(), t: now }); lastPop = now; }
+  cons = cons.filter(l => now - l.t < CONS_LIFE).slice(-CONS_LINES);
+  bubble = bubble.filter((l, i) => i === bubble.length - 1 || now - l.t < LIFE);
   if (playing) { tick += 2; if (tick >= planEnd()) { playing = false; tick = -1; } }
 
   if (!geo) { idle(); return requestAnimationFrame(render); }
@@ -149,9 +157,27 @@ function render(now) {
   drawTargets(now, me);
   if (me) { marker(me[0], me[1], now); drawBubble(me[0], me[1], now); }
   hud();
+  consolePanel(now);
   requestAnimationFrame(render);
 }
-const life = l => l.kind === 'decision' ? LIFE * 3 : LIFE;
+
+// the top-right corner: the bot's own log, small, fading
+function consolePanel(now) {
+  if (!cons.length) return;
+  ctx.save(); ctx.scale(U, U);
+  const W = cv.width / U, lh = 15, w = 420, x = W - w - 10, y = 10, h = cons.length * lh + 12;
+  ctx.fillStyle = 'rgba(14,16,19,0.75)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 6); ctx.fill();
+  ctx.font = `12px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  cons.forEach((l, i) => {
+    const age = now - l.t, a = Math.max(0, Math.min(1, age / 150) * Math.min(1, (CONS_LIFE - age) / 1500));
+    const c = l.kind === 'decision' ? '255,200,90' : l.kind === 'log' ? '225,229,235' : '175,182,194';
+    let s = l.text; while (ctx.measureText(s).width > w - 14 && s.length > 4) s = s.slice(0, -2);
+    if (s !== l.text) s = s.slice(0, -1) + '…';
+    ctx.fillStyle = `rgba(${c},${a})`; ctx.fillText(s, x + 7, y + 6 + i * lh);
+  });
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
 
 // the canvas fills the window keeping the map's aspect
 function fit() {
@@ -275,36 +301,41 @@ function drawTargets(now, me) {
   }
 }
 
-// the think bubble: the newest lines above the worm, fading with age, little circles down to it
+// the think bubble: plain words above the turn worm; the newest typed in, the older fading
 function drawBubble(wx, wy, now) {
   if (!bubble.length) return;
   ctx.save(); ctx.translate(wx, wy); ctx.scale(U, U);
   const x = 0, y = 0, minX = -wx / U + 6, maxX = (geo.w - wx) / U - 6, minY = -wy / U + 6;
-  const lines = bubble.map(l => {
-    ctx.font = `${l.kind === 'decision' ? 'bold ' : ''}13px ${FONT}`;
-    let s = l.text; while (ctx.measureText(s).width > 420 && s.length > 4) s = s.slice(0, -2);
-    if (s !== l.text) s = s.slice(0, -1) + '…';
-    return { ...l, s, w: ctx.measureText(s).width };
+  const last = bubble.length - 1;
+  const lines = bubble.map((l, i) => {
+    let s = l.text;
+    if (i === last) {
+      const n = Math.min(s.length, Math.floor((now - l.t) / 28));        // typed in
+      const dots = s.endsWith('…') && n === s.length;
+      s = s.slice(0, n);
+      if (dots) s = s.slice(0, -1) + '.'.repeat(1 + Math.floor(now / 400) % 3);
+    }
+    ctx.font = i === last ? `bold 15px ${FONT}` : `13px ${FONT}`;
+    return { ...l, s, w: ctx.measureText(l.text).width, i };
   });
-  const lh = 17, pad = 8, w = Math.max(...lines.map(l => l.w)) + pad * 2, h = lines.length * lh + pad * 2 - 4;
+  const lh = 19, pad = 9, w = Math.max(...lines.map(l => l.w)) + pad * 2 + 8, h = lines.length * lh + pad * 2 - 4;
   const bx = Math.max(minX, Math.min(maxX - w, x - w / 2));
-  let by = y - 56 - h;
+  let by = y - 58 - h;
   const below = by < minY; if (below) by = y + 40;
-  ctx.fillStyle = 'rgba(14,16,19,0.82)'; ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.roundRect(bx, by, w, h, 10); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(250,250,252,0.94)'; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(bx, by, w, h, 12); ctx.fill(); ctx.stroke();
   // the thought circles between the bubble and the worm
-  const ey = below ? by : by + h, cx = Math.max(bx + 12, Math.min(bx + w - 12, x));
-  for (const [k, r] of [[0.3, 5], [0.6, 3.5]]) {
-    ctx.beginPath(); ctx.arc(cx + (x - cx) * k, ey + (y - ey) * k * 0.6, r * 0.8, 0, 7); ctx.fill(); ctx.stroke();
+  const ey = below ? by : by + h, cx = Math.max(bx + 14, Math.min(bx + w - 14, x));
+  for (const [k, r] of [[0.3, 5.5], [0.6, 3.5]]) {
+    ctx.beginPath(); ctx.arc(cx + (x - cx) * k, ey + (y - ey) * k * 0.6, r, 0, 7); ctx.fill(); ctx.stroke();
   }
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  lines.forEach((l, i) => {
-    const age = now - l.t, a = Math.max(0, Math.min(1, age / 200) * Math.min(1, (life(l) - age) / 900));
-    const c = l.kind === 'decision' ? '255,200,90' : l.kind === 'log' ? '230,234,240' : '150,158,170';
-    ctx.fillStyle = `rgba(${c},${a})`;
-    ctx.font = `${l.kind === 'decision' ? 'bold ' : ''}13px ${FONT}`;
-    ctx.fillText(l.s, bx + pad, by + pad + i * lh);
-  });
+  for (const l of lines) {
+    const age = now - l.t, a = l.i === last ? 1 : Math.max(0, Math.min(1, (LIFE - age) / 1200)) * 0.55;
+    ctx.fillStyle = `rgba(20,22,26,${a})`;
+    ctx.font = l.i === last ? `bold 15px ${FONT}` : `13px ${FONT}`;
+    ctx.fillText(l.s, bx + pad, by + pad + l.i * lh + (l.i === last ? 0 : 1));
+  }
   ctx.textBaseline = 'alphabetic';
   ctx.restore();
 }
