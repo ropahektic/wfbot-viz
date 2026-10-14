@@ -6,101 +6,100 @@
 <title>WFbot viz</title>
 <style>
   :root {
-    --bg: #0e1013; --panel: #15181d; --line: #252a31; --text: #c9ced6; --dim: #6b7380;
-    --land: #3b5a3c; --water: #1b3a57; --me: #4fc3ff; --enemy: #ff5d5d; --friend: #57d18c;
-    --walk: #e8e8e8; --water-hi: #9fd4ff; --chute: #6fe3ff; --shot: #ffb347; --blast: #ff7a45;
+    --bg: #0b0c0f; --land: #3b5a3c; --water: #1b3a57; --water-hi: #9fd4ff;
+    --walk: #e8e8e8; --chute: #6fe3ff; --shot: #ffb347; --blast: #ff7a45; --target: #ff3b3b;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 ui-monospace, Consolas, monospace; }
-  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
-  header b { letter-spacing: .08em; font-weight: 600; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }
-  .dot.on { background: #4cd964; box-shadow: 0 0 6px #4cd964; }
-  .sp { flex: 1; }
-  header span { color: var(--dim); }
-  button, input { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font: inherit; }
-  button:hover { border-color: var(--dim); cursor: pointer; }
-  input { width: 64px; }
-  main { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; }
-  #wrap { position: relative; width: 100%; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #0b0c0f; }
-  canvas { display: block; width: 100%; height: auto; }
-  #idle { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); }
-  details { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
-  summary { padding: 6px 10px; cursor: pointer; color: var(--dim); user-select: none; }
-  summary b { color: var(--text); font-weight: 500; }
-  .body { padding: 0 10px 8px; white-space: pre-wrap; }
-  #log { max-height: 180px; overflow: auto; color: var(--dim); }
-  #log div:last-child { color: var(--text); }
-  .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--dim); }
-  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  canvas { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: block; }
+  #cfg { position: fixed; right: 6px; bottom: 6px; opacity: 0; transition: opacity .2s; font: 12px ui-monospace, Consolas, monospace; color: #6b7380; }
+  #cfg:hover { opacity: 1; }
+  #cfg input, #cfg button { background: #15181d; color: #c9ced6; border: 1px solid #252a31; border-radius: 4px; padding: 2px 6px; font: inherit; width: 56px; }
+  #cfg button { width: auto; cursor: pointer; }
 </style>
 </head>
 <body>
-<header>
-  <div class="dot" id="dot"></div><b>WFBOT</b><span id="meta">offline</span>
-  <div class="sp"></div>
-  <button id="replay" title="replay the plan">replay</button>
-  <label><span>port</span> <input id="port" value="8765"></label>
-</header>
-<main>
-  <div id="wrap"><canvas id="cv" width="1920" height="696"></canvas><div id="idle">waiting for the bot…</div></div>
-  <details open><summary>decision — <b id="dec">—</b></summary><div class="body" id="plan"></div></details>
-  <details><summary>thinking</summary><div class="body" id="log"></div></details>
-  <details><summary>legend</summary><div class="body legend">
-    <span><i style="background:none;border:2px solid #fff"></i>turn worm</span><span><i style="background:#ff5d5d"></i><i style="background:#4fc3ff"></i><i style="background:#57d18c"></i>teams</span>
-    <span><i style="background:none;border:2px solid #d33"></i>mine</span><span><i style="background:#e8d9a8"></i>rope</span><span><i style="background:var(--walk)"></i>walk / jump</span>
-    <span><i style="background:var(--chute)"></i>chute</span><span><i style="background:var(--shot)"></i>shot</span>
-    <span><i style="background:var(--blast)"></i>blast</span>
-  </div></details>
-</main>
+<canvas id="cv" width="1920" height="696"></canvas>
+<div id="cfg"><button id="replay">replay</button> port <input id="port" value="8765"></div>
 <script>
 const $ = id => document.getElementById(id);
 const cv = $('cv'), ctx = cv.getContext('2d');
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-let turn = null, plan = null, land = null, anim = 0, es = null;
-let geo = null, ents = null, entsAt = 0, trails = new Map(), turnWorm = 0;
+const C = {}; for (const n of ['land', 'water', 'water-hi', 'walk', 'chute', 'shot', 'blast', 'target']) C[n] = css('--' + n);
 const TEAMS = ['#ff5d5d', '#4fc3ff', '#57d18c', '#f7d154', '#c78bff', '#ff9f43'];
 const teamColor = t => TEAMS[t % TEAMS.length];
+const FONT = 'ui-monospace, Consolas, monospace';
+
+let es = null, online = false;
+let geo = null, land = null, turn = null, plan = null, ents = null, entsAt = 0;
+let trails = new Map(), turnWorm = 0, targets = [];   // targets: {id, x, y}
+let tick = -1, playing = false;
+let U = 1, S = 1;   // canvas px per screen px; the drawing boost for small displays
+// the think bubble: lines with their birth time; a queue paces them in
+let bubble = [], queue = [], lastPop = 0, decision = null;
+const LIFE = 5200, GAP = 260, MAXLINES = 5;
 
 function connect() {
   if (es) es.close();
   const port = $('port').value || 8765;
   const base = location.port === String(port) ? '' : `http://127.0.0.1:${port}`;
   es = new EventSource(`${base}/events`);
-  es.onopen = () => $('dot').classList.add('on');
-  es.onerror = () => { $('dot').classList.remove('on'); $('meta').textContent = 'offline'; };
+  es.onopen = () => online = true;
+  es.onerror = () => online = false;
   es.onmessage = e => { try { on(JSON.parse(e.data)); } catch (_) {} };
+}
+
+function say(text, kind) {
+  if (!text) return;
+  queue.push({ text, kind });
+  if (queue.length > 8) queue.splice(0, queue.length - 8);   // a flood: keep the newest
 }
 
 function on(m) {
   if (m.type === 'map') {
-    geo = m; land = terrain(m); $('idle').style.display = 'none'; if (!anim) draw();
+    geo = m; land = terrain(m);
   } else if (m.type === 'ents') {
     ents = m; entsAt = performance.now();
     const me = m.worms.find(w => w[5]);
-    if (me && me[0] !== turnWorm) { turnWorm = me[0]; trails.clear(); }
+    if (me && me[0] !== turnWorm) {
+      turnWorm = me[0]; trails.clear(); bubble = []; queue = [];
+      if (plan) { plan = null; targets = []; decision = null; }
+    }
     for (const w of m.worms) if (w[5]) track(w[0], w[1], w[2]);
     for (const q of m.proj) track(q[0], q[1], q[2]);
-    $('meta').textContent = `${turn ? turn.mode + ' · ' : ''}frame ${m.t} · wind ${m.wind > 0 ? '→' : m.wind < 0 ? '←' : '·'} ${Math.abs(m.wind).toFixed(2)}`;
-    if (!anim) draw();
+    for (const t of targets) { const w = t.id && m.worms.find(w => w[0] === t.id); if (w) { t.x = w[1]; t.y = w[2]; } }
   } else if (m.type === 'turn') {
-    turn = m; plan = null; geo = m;
-    $('idle').style.display = 'none';
-    $('log').innerHTML = ''; $('dec').textContent = 'thinking…'; $('plan').textContent = '';
-    land = terrain(m); draw();
+    turn = m; plan = null; targets = []; geo = m; land = terrain(m); decision = null;
   } else if (m.type === 'log') {
-    const d = document.createElement('div'); d.textContent = m.text; $('log').appendChild(d);
-    $('log').scrollTop = 1e9;
+    say(m.text, 'log');
+  } else if (m.type === 'think') {
+    say(m.text, 'raw');
   } else if (m.type === 'plan') {
-    plan = m; $('dec').textContent = m.text.split('\n')[0]; $('plan').textContent = m.text.split('\n').slice(1).join('\n');
-    play();
+    plan = m; decision = m.text.split('\n')[0];
+    say('→ ' + decision, 'decision');
+    pickTargets(); play();
+  }
+}
+
+// the target: the enemies the blast sends flying, else the enemy nearest the blast
+function pickTargets() {
+  targets = [];
+  const pts = plan.flights.map(f => f.pts[0]);
+  if (!pts.length && plan.blast && turn) {
+    let best = null, bd = 1e9;
+    for (const [x, y, k] of turn.worms) if (k === 'enemy') { const d = Math.hypot(x - plan.blast[0], y - plan.blast[1]); if (d < bd) { bd = d; best = [x, y]; } }
+    if (best) pts.push(best);
+  }
+  for (const [x, y] of pts) {
+    let id = 0, bd = 30;
+    if (ents) for (const w of ents.worms) { const d = Math.hypot(w[1] - x, w[2] - y); if (d < bd) { bd = d; id = w[0]; } }
+    targets.push({ id, x, y });
   }
 }
 
 function terrain(m) {
   const c = document.createElement('canvas'); c.width = m.w; c.height = m.h;
   const g = c.getContext('2d'), img = g.createImageData(m.cw, m.ch), raw = atob(m.map);
-  const [r, gr, b] = hex(css('--land'));
+  const [r, gr, b] = hex(C.land);
   for (let i = 0; i < m.cw * m.ch; i++) {
     if (raw.charCodeAt(i >> 3) >> (i & 7) & 1) { const o = i * 4; img.data[o] = r; img.data[o+1] = gr; img.data[o+2] = b; img.data[o+3] = 255; }
   }
@@ -109,6 +108,7 @@ function terrain(m) {
   return c;
 }
 const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+const hx2 = v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
 
 function track(id, x, y) {
   let t = trails.get(id); if (!t) trails.set(id, t = []);
@@ -116,66 +116,183 @@ function track(id, x, y) {
   if (t.length > 600) t.shift();
 }
 
-function draw() {
-  if (!geo) return;
-  cv.width = geo.w; cv.height = geo.h;
-  ctx.fillStyle = css('--water'); ctx.fillRect(0, geo.water, geo.w, geo.h - geo.water);
-  ctx.drawImage(land, 0, 0);
-  if (ents && performance.now() - entsAt < 3000) drawLive(); else if (turn) drawTurn();
-  if (plan && turn) drawPlan();
+function dotAt(x, y, r, c, ring) {
+  ctx.beginPath(); ctx.arc(x, y, r * S, 0, 7);
+  if (ring) { ctx.strokeStyle = c; ctx.lineWidth = S * (2); ctx.stroke(); } else { ctx.fillStyle = c; ctx.fill(); }
 }
 
-// the live game (every mode): team-coloured worms, the turn worm ringed with its trail, rope,
-// chute canopy, projectiles with their trails, mines, drums, crates
+// ---------------------------------------------------------------- the frame
+function render(now) {
+  // the bubble's rhythm: one queued line in every GAP ms, each fades out after its life
+  if (queue.length && now - lastPop > GAP) { bubble.push({ ...queue.shift(), t: now }); lastPop = now; }
+  bubble = bubble.filter(l => now - l.t < life(l));
+  if (bubble.length > MAXLINES) bubble.splice(0, bubble.length - MAXLINES);
+  if (playing) { tick += 2; if (tick >= planEnd()) { playing = false; tick = -1; } }
+
+  if (!geo) { idle(); return requestAnimationFrame(render); }
+  if (cv.width !== geo.w || cv.height !== geo.h) { cv.width = geo.w; cv.height = geo.h; }
+  fit();
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = C.water; ctx.fillRect(0, geo.water, geo.w, geo.h - geo.water);
+  ctx.drawImage(land, 0, 0);
+  const live = ents && now - entsAt < 3000;
+  const me = live ? drawLive() : turn ? drawTurn() : null;
+  if (plan && turn) drawPlan();
+  drawTargets(now, me);
+  if (me) { marker(me[0], me[1], now); drawBubble(me[0], me[1], now); }
+  hud();
+  requestAnimationFrame(render);
+}
+const life = l => l.kind === 'decision' ? LIFE * 3 : LIFE;
+
+// the canvas fills the window keeping the map's aspect
+function fit() {
+  const k = Math.min(innerWidth / cv.width, innerHeight / cv.height), w = Math.floor(cv.width * k) + 'px', h = Math.floor(cv.height * k) + 'px';
+  if (cv.style.width !== w || cv.style.height !== h) { cv.style.width = w; cv.style.height = h; }
+  U = Math.max(1, 1 / k); S = Math.max(1, U * 0.7);
+}
+
+function idle() {
+  if (cv.width !== 1920) { cv.width = 1920; cv.height = 696; }
+  fit();
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = '#6b7380'; ctx.font = `28px ${FONT}`; ctx.textAlign = 'center';
+  ctx.fillText(online ? 'connected · waiting for a turn…' : 'waiting for the bot…', 960, 348);
+}
+
+// the live game (every mode)
 function drawLive() {
   const e = ents;
-  for (const [x, y] of e.mines) dotAt(x, y, 4, '#d33', true);
+  for (const [x, y] of e.mines) dotAt(x, y, 5, '#d33', true);
   for (const [x, y] of e.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
-  for (const [x, y] of e.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
+  for (const [x, y] of e.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = S * (2); ctx.strokeRect(x - 10, y - 18, 20, 24); }
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   for (const [id, t] of trails) {
     if (t.length < 2) continue;
     const isProj = !e.worms.some(w => w[0] === id);
-    ctx.strokeStyle = isProj ? css('--shot') + '99' : '#ffffff55'; ctx.lineWidth = 2;
-    ctx.setLineDash(isProj ? [2, 4] : []);
+    ctx.strokeStyle = isProj ? C.shot + 'aa' : '#ffffff66'; ctx.lineWidth = S * (isProj ? 2 : 3);
+    ctx.setLineDash(isProj ? [2, 5] : []);
     ctx.beginPath(); ctx.moveTo(t[0][0], t[0][1]); for (const p of t) ctx.lineTo(p[0], p[1]); ctx.stroke();
   }
   ctx.setLineDash([]);
   if (e.rope.length > 1) {
-    ctx.strokeStyle = '#e8d9a8'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#e8d9a8'; ctx.lineWidth = S * (2);
     ctx.beginPath(); ctx.moveTo(e.rope[0][0], e.rope[0][1]); for (const p of e.rope) ctx.lineTo(p[0], p[1]); ctx.stroke();
-    dotAt(e.rope[0][0], e.rope[0][1], 3, '#e8d9a8');
+    dotAt(e.rope[0][0], e.rope[0][1], 4, '#e8d9a8');
   }
-  for (const [id, x, y, team, st, on] of e.worms) {
+  let me = null;
+  for (const [, x, y, team, st, on] of e.worms) {
     if (st === 0x7D) canopy(x, y);
-    dotAt(x, y, 9, teamColor(team));
-    if (on) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.stroke(); }
+    dotAt(x, y, on ? 11 : 9, teamColor(team));
+    if (on) me = [x, y];
   }
-  for (const [, x, y] of e.proj) dotAt(x, y, 5, css('--shot'));
+  for (const [, x, y] of e.proj) { dotAt(x, y, 6, C.shot); dotAt(x, y, 10, C.shot + '55', true); }
+  return me;
 }
 
+// default mode's snapshot when there is no live feed
 function drawTurn() {
-  for (const [x, y] of turn.mines) dotAt(x, y, 4, '#d33', true);
+  for (const [x, y] of turn.mines) dotAt(x, y, 5, '#d33', true);
   for (const [x, y] of turn.drums) { ctx.fillStyle = '#c97a2b'; ctx.fillRect(x - 8, y - 12, 16, 22); }
-  for (const [x, y] of turn.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = 2; ctx.strokeRect(x - 10, y - 18, 20, 24); }
+  for (const [x, y] of turn.crates) { ctx.strokeStyle = '#e6c84f'; ctx.lineWidth = S * (2); ctx.strokeRect(x - 10, y - 18, 20, 24); }
   const flying = plan && plan.blast && (tick < 0 || tick >= plan.blast[3]) ? plan.flights.map(f => f.pts[0]) : [];
   for (const [x, y, k] of turn.worms) {
     if (flying.some(p => Math.abs(p[0] - x) < 2 && Math.abs(p[1] - y) < 2)) continue;
-    dotAt(x, y, 9, css(k === 'enemy' ? '--enemy' : '--friend'));
+    dotAt(x, y, 9, k === 'enemy' ? TEAMS[0] : TEAMS[2]);
   }
-  if (!plan || !plan.route.length) dotAt(turn.me[0], turn.me[1], 10, css('--me'));
+  if (!plan || !plan.route.length) { dotAt(turn.me[0], turn.me[1], 11, TEAMS[1]); return turn.me; }
+  const w = at(plan.route, tick < 0 ? 1e9 : tick, 3);
+  return w ? [w[0][0], w[0][1]] : turn.me;
 }
 
-function dotAt(x, y, r, c, ring) {
-  ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
-  if (ring) { ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.stroke(); } else { ctx.fillStyle = c; ctx.fill(); }
+// the turn worm: a pulsing ring and an arrow over it
+function marker(x, y, now) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(U, U); x = 0; y = 0; S = 1;
+  const p = (Math.sin(now / 220) + 1) / 2;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = S * (2.5);
+  ctx.beginPath(); ctx.arc(x, y, 16 + p * 4, 0, 7); ctx.stroke();
+  ctx.strokeStyle = `rgba(255,255,255,${0.35 * (1 - p)})`; ctx.lineWidth = S * (6);
+  ctx.beginPath(); ctx.arc(x, y, 24 + p * 10, 0, 7); ctx.stroke();
+  const ay = y - 34 - p * 5;
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x - 8, ay - 10); ctx.lineTo(x + 8, ay - 10); ctx.lineTo(x, ay); ctx.closePath(); ctx.fill();
+  ctx.restore(); S = Math.max(1, U * 0.7);
 }
 
-// the plan as a timeline in game ticks: the worm along its route (canopy while chuting), the
-// shot, the blast, the enemies flying along their arcs (splash when they drown)
-const SPEED = 2;  // ticks per animation frame (~2x game speed)
-let tick = -1;
-function at(pts, t, ti) {  // position at tick t on points carrying their tick at index ti
+// the target: a turning crosshair, and a faint line from the turn worm
+function drawTargets(now, me) {
+  for (const t of targets) {
+    const r = 22 + Math.sin(now / 180) * 2;
+    if (me) {
+      ctx.strokeStyle = C.target + '55'; ctx.lineWidth = S * (1.5); ctx.setLineDash([6, 8]);
+      ctx.beginPath(); ctx.moveTo(me[0], me[1]); ctx.lineTo(t.x, t.y); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.save(); ctx.translate(t.x, t.y); ctx.scale(U * 0.8, U * 0.8); ctx.rotate(now / 700);
+    ctx.strokeStyle = C.target; ctx.lineWidth = 2.5;
+    for (let k = 0; k < 4; k++) { ctx.beginPath(); ctx.arc(0, 0, r, k * Math.PI / 2 + 0.25, k * Math.PI / 2 + Math.PI / 2 - 0.25); ctx.stroke(); }
+    for (let k = 0; k < 4; k++) { ctx.rotate(Math.PI / 2); ctx.beginPath(); ctx.moveTo(r - 6, 0); ctx.lineTo(r + 8, 0); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+
+// the think bubble: the newest lines above the worm, fading with age, little circles down to it
+function drawBubble(wx, wy, now) {
+  if (!bubble.length) return;
+  ctx.save(); ctx.translate(wx, wy); ctx.scale(U, U);
+  const x = 0, y = 0, minX = -wx / U + 6, maxX = (geo.w - wx) / U - 6, minY = -wy / U + 6;
+  const lines = bubble.map(l => {
+    ctx.font = `${l.kind === 'decision' ? 'bold ' : ''}13px ${FONT}`;
+    let s = l.text; while (ctx.measureText(s).width > 420 && s.length > 4) s = s.slice(0, -2);
+    if (s !== l.text) s = s.slice(0, -1) + '…';
+    return { ...l, s, w: ctx.measureText(s).width };
+  });
+  const lh = 17, pad = 8, w = Math.max(...lines.map(l => l.w)) + pad * 2, h = lines.length * lh + pad * 2 - 4;
+  const bx = Math.max(minX, Math.min(maxX - w, x - w / 2));
+  let by = y - 56 - h;
+  const below = by < minY; if (below) by = y + 40;
+  ctx.fillStyle = 'rgba(14,16,19,0.82)'; ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(bx, by, w, h, 10); ctx.fill(); ctx.stroke();
+  // the thought circles between the bubble and the worm
+  const ey = below ? by : by + h, cx = Math.max(bx + 12, Math.min(bx + w - 12, x));
+  for (const [k, r] of [[0.3, 5], [0.6, 3.5]]) {
+    ctx.beginPath(); ctx.arc(cx + (x - cx) * k, ey + (y - ey) * k * 0.6, r * 0.8, 0, 7); ctx.fill(); ctx.stroke();
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  lines.forEach((l, i) => {
+    const age = now - l.t, a = Math.max(0, Math.min(1, age / 200) * Math.min(1, (life(l) - age) / 900));
+    const c = l.kind === 'decision' ? '255,200,90' : l.kind === 'log' ? '230,234,240' : '150,158,170';
+    ctx.fillStyle = `rgba(${c},${a})`;
+    ctx.font = `${l.kind === 'decision' ? 'bold ' : ''}13px ${FONT}`;
+    ctx.fillText(l.s, bx + pad, by + pad + i * lh);
+  });
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
+
+// the corner: connection, mode, frame, wind, decision
+function hud() {
+  ctx.save(); ctx.scale(U * 0.9, U * 0.9); const s0 = S; S = 1;
+  const x = 14, y = 14;
+  ctx.fillStyle = 'rgba(14,16,19,0.7)'; ctx.beginPath(); ctx.roundRect(x - 6, y - 6, 430, decision ? 64 : 38, 8); ctx.fill();
+  dotAt(x + 7, y + 12, 6, online ? '#4cd964' : '#555');
+  ctx.font = `bold 18px ${FONT}`; ctx.fillStyle = '#e6e9ee'; ctx.textAlign = 'left';
+  ctx.fillText('WFBOT', x + 22, y + 18);
+  ctx.font = `16px ${FONT}`; ctx.fillStyle = '#9aa3af';
+  ctx.fillText(`${turn ? turn.mode + ' · ' : ''}f ${ents ? ents.t : turn ? turn.frame : '-'}`, x + 94, y + 18);
+  // the wind: an arrow as long as it is strong
+  const wind = ents ? ents.wind : turn ? turn.wind : 0, wx = x + 340, wy = y + 12, L = Math.abs(wind) * 90, d = Math.sign(wind);
+  ctx.strokeStyle = C.chute; ctx.fillStyle = C.chute; ctx.lineWidth = S * (3);
+  ctx.beginPath(); ctx.moveTo(wx - L / 2 * d, wy); ctx.lineTo(wx + L / 2 * d, wy); ctx.stroke();
+  if (d) { ctx.beginPath(); ctx.moveTo(wx + L / 2 * d + 8 * d, wy); ctx.lineTo(wx + L / 2 * d, wy - 6); ctx.lineTo(wx + L / 2 * d, wy + 6); ctx.fill(); }
+  if (decision) {
+    ctx.font = `bold 16px ${FONT}`; ctx.fillStyle = '#ffc85a';
+    let s = decision; while (ctx.measureText(s).width > 410 && s.length > 4) s = s.slice(0, -2);
+    ctx.fillText(s, x + 4, y + 44);
+  }
+  ctx.restore(); S = s0;
+}
+
+// ---------------------------------------------------------------- default mode's plan timeline
+function at(pts, t, ti) {
   if (!pts.length) return null;
   if (t <= pts[0][ti]) return [pts[0], 0];
   for (let i = 1; i < pts.length; i++) if (pts[i][ti] >= t) {
@@ -190,86 +307,82 @@ function planEnd() {
   return Math.max(r.length ? r[r.length-1][3] : 0, b ? b[3] + fl + 40 : plan.shot_t0 + plan.shot.length * plan.shot_dt);
 }
 function drawPlan() {
-  const r = plan.route, t = tick < 0 ? 1e9 : tick;
-  // the whole route, faint; walked part, bright
+  const r = plan.route, t = tick < 0 ? 1e9 : tick, ghost = ents && performance.now() - entsAt < 3000;
   ctx.lineCap = 'round';
   for (let i = 1; i < r.length; i++) {
     const k = r[i][2], done = r[i][3] <= t;
-    ctx.strokeStyle = css(k === 'chute' ? '--chute' : '--walk') + (done ? '' : '44');
-    ctx.lineWidth = done ? 3 : 2;
+    ctx.strokeStyle = (k === 'chute' ? C.chute : C.walk) + (done ? 'cc' : '44');
+    ctx.lineWidth = S * (done ? 3 : 2);
     ctx.setLineDash(k === 'jump' || k === 'fall' ? [3, 6] : []);
     ctx.beginPath(); ctx.moveTo(r[i-1][0], r[i-1][1]); ctx.lineTo(r[i][0], r[i][1]); ctx.stroke();
   }
   ctx.setLineDash([]);
-  // the worm
-  const w = at(r, t, 3);
+  // the planned worm: a ghost next to the live one while the plan replays
+  const w = playing && ghost ? at(r, t, 3) : null;
   if (w) {
     const [[x, y, k]] = w;
     if (k === 'chute') canopy(x, y);
-    if (k === 'crouch') { ctx.fillStyle = css('--me'); ctx.beginPath(); ctx.ellipse(x, y + 3, 11, 7, 0, 0, 7); ctx.fill(); }
-    else dotAt(x, y, 10, css('--me'));
+    ctx.globalAlpha = 0.55;
+    if (k === 'crouch') { ctx.fillStyle = TEAMS[1]; ctx.beginPath(); ctx.ellipse(x, y + 3, 11, 7, 0, 0, 7); ctx.fill(); }
+    else dotAt(x, y, 10, TEAMS[1]);
+    ctx.globalAlpha = 1;
+  } else if (!ghost) {
+    const v = at(r, t, 3);
+    if (v && v[0][2] === 'chute') canopy(v[0][0], v[0][1]);
   }
-  // the shot
   const s = plan.shot, st = (t - plan.shot_t0) / plan.shot_dt;
   if (s.length && st >= 0) {
     const n = Math.min(s.length - 1, Math.floor(st));
-    ctx.strokeStyle = css('--shot'); ctx.setLineDash(plan.weapon === 'Grenade' ? [2, 5] : []); ctx.lineWidth = 2;
+    ctx.strokeStyle = C.shot; ctx.setLineDash(plan.weapon === 'Grenade' ? [2, 5] : []); ctx.lineWidth = S * (2);
     ctx.beginPath(); ctx.moveTo(s[0][0], s[0][1]); for (let i = 1; i <= n; i++) ctx.lineTo(s[i][0], s[i][1]); ctx.stroke(); ctx.setLineDash([]);
     if (!plan.blast || t < plan.blast[3]) {
       const q = s[n];
-      if (plan.weapon === 'Grenade') dotAt(q[0], q[1], 5, css('--shot'));
+      if (plan.weapon === 'Grenade') dotAt(q[0], q[1], 6, C.shot);
       else { const p = s[Math.max(0, n - 1)], a = Math.atan2(q[1] - p[1], q[0] - p[0]);
-        ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(a); ctx.fillStyle = css('--shot'); ctx.fillRect(-7, -3, 14, 6); ctx.restore(); }
+        ctx.save(); ctx.translate(q[0], q[1]); ctx.rotate(a); ctx.fillStyle = C.shot; ctx.fillRect(-8, -3, 16, 6); ctx.restore(); }
     }
   }
-  // the blast and the flights
   const b = plan.blast;
   if (b && t >= b[3]) {
-    const bt = t - b[3], [x, y, rad] = b;
-    const flash = Math.max(0, 1 - bt / 30);
-    ctx.fillStyle = css('--blast') + hx2(0x22 + flash * 0x99); ctx.beginPath(); ctx.arc(x, y, rad * (0.6 + 0.4 * Math.min(1, bt / 6)), 0, 7); ctx.fill();
-    ctx.strokeStyle = css('--blast'); ctx.lineWidth = 2; ctx.stroke();
+    const bt = t - b[3], [x, y, rad] = b, flash = Math.max(0, 1 - bt / 30);
+    ctx.fillStyle = C.blast + hx2(0x22 + flash * 0x99); ctx.beginPath(); ctx.arc(x, y, rad * (0.6 + 0.4 * Math.min(1, bt / 6)), 0, 7); ctx.fill();
+    ctx.strokeStyle = C.blast; ctx.lineWidth = S * (2); ctx.stroke();
     for (const f of plan.flights) {
       const p = f.pts, n = Math.min(p.length - 1, bt);
-      ctx.strokeStyle = css('--enemy'); ctx.lineWidth = 2; ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = TEAMS[0]; ctx.lineWidth = S * (2); ctx.setLineDash([4, 5]);
       ctx.beginPath(); ctx.moveTo(p[0][0], p[0][1]); for (let i = 1; i <= n; i++) ctx.lineTo(p[i][0], p[i][1]); ctx.stroke(); ctx.setLineDash([]);
       const q = p[n];
-      if (f.drowned && n === p.length - 1) splash(q[0], turn.water, bt - (p.length - 1));
-      else dotAt(q[0], q[1], 9, css('--enemy'));
+      if (f.drowned && n === p.length - 1) splash(q[0], geo.water, bt - (p.length - 1));
+      else if (playing || !ghost) dotAt(q[0], q[1], 9, TEAMS[0]);
     }
   } else if (b) {
-    // before the blast: where they will go, faint
     for (const f of plan.flights) {
-      ctx.strokeStyle = css('--enemy') + '33'; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+      ctx.strokeStyle = TEAMS[0] + '44'; ctx.lineWidth = S * (1.5); ctx.setLineDash([2, 6]);
       ctx.beginPath(); ctx.moveTo(f.pts[0][0], f.pts[0][1]); for (const q of f.pts) ctx.lineTo(q[0], q[1]); ctx.stroke(); ctx.setLineDash([]);
     }
   }
 }
-const hx2 = v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
 function canopy(x, y) {
-  ctx.strokeStyle = css('--chute'); ctx.fillStyle = css('--chute') + '55'; ctx.lineWidth = 2;
+  ctx.save(); ctx.translate(x, y); ctx.scale(S, S); ctx.translate(-x, -y); ctx.lineWidth = 2;
+  ctx.strokeStyle = C.chute; ctx.fillStyle = C.chute + '55'; ctx.lineWidth = S * (2);
   ctx.beginPath(); ctx.arc(x, y - 26, 18, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x - 18, y - 26); ctx.lineTo(x, y - 6); ctx.lineTo(x + 18, y - 26); ctx.stroke();
+  ctx.restore();
 }
 function splash(x, y, k) {
   const a = Math.max(0, 1 - k / 60);
-  ctx.strokeStyle = css('--water-hi') + hx2(255 * a); ctx.lineWidth = 2;
+  ctx.strokeStyle = C['water-hi'] + hx2(255 * a); ctx.lineWidth = S * (2);
   for (const r of [8, 16, 24]) { ctx.beginPath(); ctx.ellipse(x, y, r + k * 0.4, (r + k * 0.4) / 3, 0, 0, 7); ctx.stroke(); }
-  ctx.fillStyle = css('--enemy') + hx2(255 * a); ctx.font = 'bold 18px ui-monospace, monospace'; ctx.textAlign = 'center';
+  ctx.fillStyle = TEAMS[0] + hx2(255 * a); ctx.font = `bold 20px ${FONT}`; ctx.textAlign = 'center';
   ctx.fillText('✕', x, y - 14);
 }
+function play() { if (plan) { tick = 0; playing = true; } }
 
-function play() {
-  cancelAnimationFrame(anim);
-  const end = planEnd(); tick = 0;
-  const step = () => { tick += SPEED; draw(); if (tick < end) anim = requestAnimationFrame(step); else { anim = 0; tick = -1; draw(); } };
-  anim = requestAnimationFrame(step);
-}
-
-$('replay').onclick = () => plan && play();
-$('port').onchange = () => { localStorage.port = $('port').value; connect(); };
-$('port').value = localStorage.port || 8765;
+$('replay').onclick = play;
+$('port').onchange = () => { try { localStorage.port = $('port').value; } catch (_) {} connect(); };
+try { $('port').value = localStorage.port || 8765; } catch (_) {}
 connect();
+requestAnimationFrame(render);
 </script>
 </body>
 </html>
